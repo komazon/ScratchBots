@@ -1,2 +1,3 @@
 # ScratchBots
 Scratchのスタジオ上で動作する自動ボット
+※Ollamaを入れてmodelfileを『sbot』でクリエイトしてからPythonコード上のスタジオID、そして任意で『to_zeon』の場所を変えてからaccount.envを作成
