@@ -21,7 +21,7 @@ zatudoko = f"{API}/studios/{id}/comments/"
 ai = "http://localhost:11434/api/generate"
 
 REPLIED_FILE = "replied_comments.json"
-name = "to_zeon"
+name = "荒草"
 model = "sbot"
 MENTION_PREFIX = f"{model}(AIbot)によると:\n"
 
@@ -204,10 +204,10 @@ def extract_new_id(body):
     return None
 
 
-# ---------- to_zeon 判定 ----------
+# ---------- name 判定 ----------
 
-def is_to_zeon(content):
-    """先頭（空白/改行/@を除く）が to_zeon で、続きが別ユーザー名の文字でない場合のみ True。"""
+def is_name(content):
+    """先頭（空白/改行/@を除く）が name で、続きが別ユーザー名の文字でない場合のみ True。"""
     head = content.lstrip().lower()
     if head.startswith("@"):
         head = head[1:]
@@ -271,9 +271,9 @@ def main():
             print("  → スキップ（自分のコメント）")
             continue
 
-        # (3) to_zeon が先頭に無ければ返信しない
-        if not is_to_zeon(content):
-            print("  → スキップ（先頭に to_zeon なし）")
+        # (3) name が先頭に無ければ返信しない
+        if not is_name(content):
+            print("  → スキップ（先頭に name なし）")
             continue
 
         # (4) 既存返信があればAPIで自分の返信を確認
@@ -309,10 +309,10 @@ def main():
             time.sleep(3)
             continue
 
-        # to_zeon 先頭なので接頭辞を付与（500字超過を防ぐ）
+        # name 先頭なので接頭辞を付与（500字超過を防ぐ）
         budget = max(0, 500 - len(MENTION_PREFIX))
         recomment = MENTION_PREFIX + recomment[:budget]
-        print(f"  → to_zeon向け: 「{MENTION_PREFIX}」を先頭に付与")
+        print(f"  → name向け: 「{MENTION_PREFIX}」を先頭に付与")
 
         # (6) 投稿
         payload = {
