@@ -1,6 +1,7 @@
 # ScratchBots
 Scratchのスタジオ上で動作する自動ボット  
-<a href="https://scratch.mit.edu/studios/52162859/comments/">すぐに試したいですか？</a>
+<a href="https://scratch.mit.edu/studios/52162859/comments/">すぐに試したいですか？</a>  
+利用する場合に**任意で**このリポジトリへのリンクをお願いいたします。
 ## 初期設定
 ### a.py内の設定:
 1. 『`id`』を自分のスタジオのIDにします
