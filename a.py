@@ -8,6 +8,9 @@ import urllib.request
 from http.cookiejar import CookieJar
 import html
 import random
+from ddgs import DDGS
+from datetime import datetime
+
 
 SITE = "https://scratch.mit.edu"
 API = "https://api.scratch.mit.edu"
@@ -22,8 +25,149 @@ ai = "http://localhost:11434/api/generate"
 
 REPLIED_FILE = "replied_comments.json"
 name = "荒草"
-model = "sbot"
+model = "Komazon_Alaxa2"
 MENTION_PREFIX = f"{model}(AIbot)によると:\n"
+
+def local_web_search(query: str) -> str:
+    print(f"  🔍 [AI自律検索]: {query}")
+    results = []
+
+    for attempt in range(3):
+        if attempt > 0:
+            print(f"  ↻ 検索結果なしのため再試行 ({attempt}/2)...")
+            time.sleep(1.5)
+
+        try:
+            with DDGS() as ddgs:
+                try:
+                    results = list(ddgs.text(query, region="jp-jp", timelimit="w", max_results=3))
+                except Exception:
+                    pass
+                if not results:
+                    results = list(ddgs.text(query, region="jp-jp", max_results=3))
+            if results:
+                break
+        except Exception as exc:
+            print(f"  検索エラー (試行 {attempt + 1}/3): {exc}")
+
+    if not results:
+        return "検索結果が見つかりませんでした。"
+
+    return "\n".join(
+        [f"・{r['title']} (URL: {r['href']}): {r['body']}" for r in results]
+    )
+def fetch_web_page(url: str) -> str:
+    print(f"  🌐 [サイト直接閲覧]: {url}")
+    try:
+        req = urllib.request.Request(url, headers=HEADERS)
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            raw_html = resp.read().decode("utf-8", "replace")
+
+        # script / style タグの中身を削除
+        text = re.sub(r"<(script|style).*?>.*?</\1>", "", raw_html, flags=re.DOTALL | re.IGNORECASE)
+        # HTMLタグを除去してテキスト化
+        text = re.sub(r"<[^>]+>", " ", text)
+        text = html.unescape(text)
+        # 連続する空白や改行を整理
+        text = re.sub(r"\s+", " ", text).strip()
+
+        if not text:
+            return "ページの本文を取得できませんでした。"
+        return text[:2000]  # コンテキスト溢れ防止のため2000文字まで
+    except Exception as exc:
+        print(f"  閲覧エラー: {exc}")
+        return f"ページの読み込みに失敗しました: {exc}"
+
+
+
+
+
+def ask_ai_with_search(prompt_text: str) -> str:
+    weekdays = ["月", "火", "水", "木", "金", "土", "日"]
+    now = datetime.now()
+    today_str = f"{now.year}年{now.month}月{now.day}日({weekdays[now.weekday()]}) {now.strftime('%H:%M')}"
+
+    chat_url = ai.replace("/api/generate", "/api/chat")
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "web_search",
+                "description": "最新情報や知らない事実を調べるためにWeb検索を行う(基本的に毎回使う)",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "検索キーワード"}
+                    },
+                    "required": ["query"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "fetch_page",
+                "description": "指定されたURLのWebページに直接アクセスして詳細な本文を読み取る",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "url": {"type": "string", "description": "閲覧したいWebページのURL（http:// または https://）"}
+                    },
+                    "required": ["url"],
+                },
+            },
+        },
+    ]
+
+    full_prompt = (
+        f"【現在日時: {today_str}】\n"
+        f"※最新情報や知らない言葉が含まれる場合は、必ず web_search ツールで検索し、詳細な内容が必要な場合やURLが直接指定された場合は fetch_page ツールでページを直接閲覧してから答えてください。\n\n"
+        f"{prompt_text}"
+    )
+    messages = [{"role": "user", "content": full_prompt}]
+
+    def post_chat(msgs, use_tools=True):
+        body = {"model": model, "messages": msgs, "stream": False, "options": {"num_ctx": 8192}}
+        if use_tools:
+            body["tools"] = tools
+        req = urllib.request.Request(
+            chat_url,
+            data=json.dumps(body).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            return json.loads(resp.read().decode("utf-8")).get("message", {})
+
+    # 検索 → サイト閲覧 → 回答 の連続呼び出しに対応（最大3ステップ）
+    msg = {}
+    for _ in range(3):
+        msg = post_chat(messages, use_tools=True)
+        if not msg.get("tool_calls"):
+            break
+
+        messages.append(msg)
+        for call in msg["tool_calls"]:
+            fn_name = call.get("function", {}).get("name")
+            args = call["function"].get("arguments", {})
+            if isinstance(args, str):
+                args = json.loads(args)
+
+            if fn_name == "web_search":
+                result = local_web_search(args.get("query", ""))
+                messages.append({"role": "tool", "content": result})
+            elif fn_name == "fetch_page":
+                result = fetch_web_page(args.get("url", ""))
+                messages.append({"role": "tool", "content": result})
+    else:
+        # 3ステップ使い切った場合はツールなしで最終回答を生成
+        msg = post_chat(messages, use_tools=False)
+
+    text = msg.get("content") or ""
+    return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+
+
+
+
 
 def init():
         global client, bot_name
@@ -287,22 +431,13 @@ def main():
 
         # (5) AI応答生成
         recomment = ""
-        AI = {
-            "model": model,
-            "prompt": f"以下のコメントに500文字以内で絶対に日本語(Japanese)で返信してください。\n\n{content}",
-            "stream": False,
-        }
         try:
-            req = urllib.request.Request(
-                ai,
-                data=json.dumps(AI).encode("utf-8"),
-                headers={"Content-Type": "application/json"},
+            recomment = ask_ai_with_search(
+            f"以下のコメントに500文字以内で絶対に日本語(Japanese)で返信してください。\n\n{content}"
             )
-            with urllib.request.urlopen(req, timeout=120) as resp:
-                recomment = (json.loads(resp.read().decode("utf-8"))
-                             .get("response") or "").strip()
         except Exception as exc:
             print(f"  AIエラー: {exc}")
+
 
         if not recomment:
             print("  → スキップ（AI応答が空）")
