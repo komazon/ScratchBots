@@ -1,6 +1,7 @@
 # ScratchBots
 Scratchのスタジオ上で動作する自動ボット  
-
+すぐに試したいですか？:
+https://scratch.mit.edu/studios/52162859/comments/
 ## 初期設定
 ### a.py内の設定:
 1. 『`id`』を自分のスタジオのIDにします
