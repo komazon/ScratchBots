@@ -6,6 +6,8 @@ import time
 import urllib.error
 import urllib.request
 from http.cookiejar import CookieJar
+import html
+import random
 
 SITE = "https://scratch.mit.edu"
 API = "https://api.scratch.mit.edu"
@@ -14,14 +16,23 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
       "Chrome/120.0.0.0 Safari/537.36")
 HEADERS = {"User-Agent": UA}
 
-id = 52035405
+id = 52162859
 zatudoko = f"{API}/studios/{id}/comments/"
 ai = "http://localhost:11434/api/generate"
 
 REPLIED_FILE = "replied_comments.json"
-MENTION_PREFIX = "llama3によると"
+name = "to_zeon"
+model = "sbot"
+MENTION_PREFIX = f"{model}(AIbot)によると:\n"
 
-
+def init():
+        global client, bot_name
+        print("ログイン中...")
+        env = load_env("account.env")
+        client = ScratchClient()
+        client.login(env["name"], env["pass"])
+        bot_name = client.username
+        print(f"ログイン成功: {bot_name}")
 class APIError(Exception):
     def __init__(self, message, code=None):
         super().__init__(message)
@@ -200,9 +211,9 @@ def is_to_zeon(content):
     head = content.lstrip().lower()
     if head.startswith("@"):
         head = head[1:]
-    if not head.startswith("to_zeon"):
+    if not head.startswith(name.lower()):
         return False
-    rest = head[len("to_zeon"):]
+    rest = head[len(name):]
     if rest and rest[0] in "abcdefghijklmnopqrstuvwxyz0123456789_-":
         return False
     return True
@@ -219,13 +230,7 @@ def load_env(filepath):
 
 
 def main():
-    print("ログイン中...")
-    env = load_env("account.env")
-    client = ScratchClient()
-    client.login(env["name"], env["pass"])
-    bot_name = client.username
-    print(f"ログイン成功: {bot_name}")
-
+    
     replied = load_replied()
     print(f"返信済み履歴: {len(replied)} 件")
 
@@ -250,7 +255,7 @@ def main():
         author = c.get("author") or {}
         author_name = str(author.get("username", "?"))
         user_id = author.get("id")
-        content = str(c.get("content") or "")
+        content = html.unescape(str(c.get("content") or ""))
         reply_count = int(c.get("reply_count") or 0)
 
         print(f"[{cid}] by {author_name} (返信数:{reply_count})")
@@ -283,7 +288,7 @@ def main():
         # (5) AI応答生成
         recomment = ""
         AI = {
-            "model": "sbot",
+            "model": model,
             "prompt": f"以下のコメントに500文字以内で絶対に日本語(Japanese)で返信してください。\n\n{content}",
             "stream": False,
         }
@@ -346,15 +351,16 @@ def main():
         replied.add(cid)
         save_replied(replied)
 
-        time.sleep(0.14)
+        time.sleep(wait_time+0.12)  # 投稿間隔を少し空ける))
 
     print("\n完了")
 
-
+init()
 while True:
     try:
         main()
     except Exception as exc:
         print(f"エラー発生: {exc}")
-    print("1秒後に再実行します...\n")
-    time.sleep(0.1)
+    wait_time = 1 + abs(random.gauss(0, 0.12))
+    print(f"{wait_time:.1f}秒後に再実行します...\n")
+    time.sleep(wait_time)
