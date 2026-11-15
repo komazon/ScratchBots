@@ -10,7 +10,7 @@ import html
 import random
 from ddgs import DDGS
 from datetime import datetime
-
+import dotenv
 
 SITE = "https://scratch.mit.edu"
 API = "https://api.scratch.mit.edu"
@@ -18,14 +18,14 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
       "AppleWebKit/537.36 (KHTML, like Gecko) "
       "Chrome/120.0.0.0 Safari/537.36")
 HEADERS = {"User-Agent": UA}
-
-id = 52162859
+dotenv.load_dotenv("account.env")
+id = os.getenv("id")
 zatudoko = f"{API}/studios/{id}/comments/"
-ai = "http://localhost:11434/api/generate"
+ai = os.getenv("ai")
 
 REPLIED_FILE = "replied_comments.json"
-name = "荒草"
-model = "Komazon_Alaxa2"
+name = os.getenv("name_demo")
+model = os.getenv("model")
 MENTION_PREFIX = f"{model}(AIbot)によると:\n"
 
 def local_web_search(query: str) -> str:
