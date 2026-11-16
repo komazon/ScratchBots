@@ -8,7 +8,7 @@ Scratchのスタジオ上で動作する自動ボット
   ↳Qwen3:14b  
 - Python3.14.4
 - ddgs9.16.1
-- python-dotenv==1.2.4
+- python-dotenv1.2.4
 ### account.envの設定:
 1. アカウント名とパスワードをbotとして使うScratchアカウントのものに設定します。  
 1. 『`id`』を自分のスタジオのIDにします
