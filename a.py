@@ -12,6 +12,7 @@ from ddgs import DDGS
 from datetime import datetime
 import dotenv
 
+wait_time = 0.1
 SITE = "https://scratch.mit.edu"
 API = "https://api.scratch.mit.edu"
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -24,19 +25,24 @@ zatudoko = f"{API}/studios/{id}/comments/"
 ai = os.getenv("ai")
 
 REPLIED_FILE = "replied_comments.json"
+STUDIO_CONTEXT_FILE = f"studio_context_{id}.json"      # ★NEW
+CONTEXT_MAX_ENTRIES = 10                                # ★NEW
 name = os.getenv("name_demo")
 model = os.getenv("model")
 MENTION_PREFIX = f"{model}(AIbot)によると:\n"
 
+bot_uid = None  # ★NEW: ログイン後に取得するボットのユーザーID
+
+
+# ---------- Web検索・ページ取得 ----------
+
 def local_web_search(query: str) -> str:
     print(f"  🔍 [AI自律検索]: {query}")
     results = []
-
     for attempt in range(3):
         if attempt > 0:
             print(f"  ↻ 検索結果なしのため再試行 ({attempt}/2)...")
             time.sleep(1.5)
-
         try:
             with DDGS() as ddgs:
                 try:
@@ -49,37 +55,29 @@ def local_web_search(query: str) -> str:
                 break
         except Exception as exc:
             print(f"  検索エラー (試行 {attempt + 1}/3): {exc}")
-
     if not results:
         return "検索結果が見つかりませんでした。"
-
     return "\n".join(
         [f"・{r['title']} (URL: {r['href']}): {r['body']}" for r in results]
     )
+
+
 def fetch_web_page(url: str) -> str:
     print(f"  🌐 [サイト直接閲覧]: {url}")
     try:
         req = urllib.request.Request(url, headers=HEADERS)
         with urllib.request.urlopen(req, timeout=15) as resp:
             raw_html = resp.read().decode("utf-8", "replace")
-
-        # script / style タグの中身を削除
         text = re.sub(r"<(script|style).*?>.*?</\1>", "", raw_html, flags=re.DOTALL | re.IGNORECASE)
-        # HTMLタグを除去してテキスト化
         text = re.sub(r"<[^>]+>", " ", text)
         text = html.unescape(text)
-        # 連続する空白や改行を整理
         text = re.sub(r"\s+", " ", text).strip()
-
         if not text:
             return "ページの本文を取得できませんでした。"
-        return text[:2000]  # コンテキスト溢れ防止のため2000文字まで
+        return text[:2000]
     except Exception as exc:
         print(f"  閲覧エラー: {exc}")
         return f"ページの読み込みに失敗しました: {exc}"
-
-
-
 
 
 def ask_ai_with_search(prompt_text: str) -> str:
@@ -96,9 +94,7 @@ def ask_ai_with_search(prompt_text: str) -> str:
                 "description": "最新情報や知らない事実を調べるためにWeb検索を行う(基本的に毎回使う)",
                 "parameters": {
                     "type": "object",
-                    "properties": {
-                        "query": {"type": "string", "description": "検索キーワード"}
-                    },
+                    "properties": {"query": {"type": "string", "description": "検索キーワード"}},
                     "required": ["query"],
                 },
             },
@@ -110,9 +106,7 @@ def ask_ai_with_search(prompt_text: str) -> str:
                 "description": "指定されたURLのWebページに直接アクセスして詳細な本文を読み取る",
                 "parameters": {
                     "type": "object",
-                    "properties": {
-                        "url": {"type": "string", "description": "閲覧したいWebページのURL（http:// または https://）"}
-                    },
+                    "properties": {"url": {"type": "string", "description": "閲覧したいWebページのURL"}},
                     "required": ["url"],
                 },
             },
@@ -121,7 +115,8 @@ def ask_ai_with_search(prompt_text: str) -> str:
 
     full_prompt = (
         f"【現在日時: {today_str}】\n"
-        f"※最新情報や知らない言葉が含まれる場合は、必ず web_search ツールで検索し、詳細な内容が必要な場合やURLが直接指定された場合は fetch_page ツールでページを直接閲覧してから答えてください。\n\n"
+        f"※最新情報や知らない言葉が含まれる場合は、必ず web_search ツールで検索し、"
+        f"詳細な内容が必要な場合やURLが直接指定された場合は fetch_page ツールでページを直接閲覧してから答えてください。\n\n"
         f"{prompt_text}"
     )
     messages = [{"role": "user", "content": full_prompt}]
@@ -138,20 +133,17 @@ def ask_ai_with_search(prompt_text: str) -> str:
         with urllib.request.urlopen(req, timeout=120) as resp:
             return json.loads(resp.read().decode("utf-8")).get("message", {})
 
-    # 検索 → サイト閲覧 → 回答 の連続呼び出しに対応（最大3ステップ）
     msg = {}
     for _ in range(3):
         msg = post_chat(messages, use_tools=True)
         if not msg.get("tool_calls"):
             break
-
         messages.append(msg)
         for call in msg["tool_calls"]:
             fn_name = call.get("function", {}).get("name")
             args = call["function"].get("arguments", {})
             if isinstance(args, str):
                 args = json.loads(args)
-
             if fn_name == "web_search":
                 result = local_web_search(args.get("query", ""))
                 messages.append({"role": "tool", "content": result})
@@ -159,24 +151,104 @@ def ask_ai_with_search(prompt_text: str) -> str:
                 result = fetch_web_page(args.get("url", ""))
                 messages.append({"role": "tool", "content": result})
     else:
-        # 3ステップ使い切った場合はツールなしで最終回答を生成
         msg = post_chat(messages, use_tools=False)
 
     text = msg.get("content") or ""
     return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
 
 
+# ---------- スタジオ共有コンテキスト ----------  ★NEW
+
+def load_studio_context():
+    try:
+        with open(STUDIO_CONTEXT_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, list) else []
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return []
 
 
+def save_studio_context(entries):
+    tmp = STUDIO_CONTEXT_FILE + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(entries[-CONTEXT_MAX_ENTRIES:], f, ensure_ascii=False, indent=2)
+        os.replace(tmp, STUDIO_CONTEXT_FILE)
+    except OSError as exc:
+        print(f"  コンテキスト保存失敗: {exc}")
+
+
+def append_studio_context(user, message, reply=None):
+    entries = load_studio_context()
+    entries.append({
+        "time": datetime.now().strftime("%m-%d %H:%M"),
+        "user": str(user)[:50],
+        "message": str(message)[:200],
+        "reply": str(reply)[:200] if reply else "",
+    })
+    save_studio_context(entries[-CONTEXT_MAX_ENTRIES:])
+
+
+def format_studio_context(entries):
+    if not entries:
+        return "（スタジオ内での過去の会話履歴はまだありません）"
+    lines = []
+    for e in entries:
+        lines.append(f"・{e.get('time', '')} @{e.get('user', '?')}: {e.get('message', '')}")
+        if e.get("reply"):
+            lines.append(f"  → bot: {e['reply']}")
+    return "\n".join(lines)
+
+
+# ---------- スレッド（返信一覧）関連 ----------  ★NEW
+
+def fetch_thread(client, studio_id, root_cid):
+    """スレッドの返信一覧を取得(新しい順ではなくAPIの返却順)。"""
+    try:
+        raw = client.get_json(
+            f"{API}/studios/{studio_id}/comments/{root_cid}/replies?limit=25&offset=0"
+        )
+    except APIError as exc:
+        print(f"  返信取得失敗: {exc}")
+        return []
+    return raw if isinstance(raw, list) else []
+
+
+def format_thread_context(root_comment, replies, up_to_idx=None):
+    """スレッド全体をAIに渡す文字列に整形。up_to_idx 以降は含めない。"""
+    lines = []
+    r_author = (root_comment.get("author") or {}).get("username", "?")
+    r_content = html.unescape(str(root_comment.get("content") or ""))
+    lines.append(f"[トップレベル] @{r_author}: {r_content}")
+    if up_to_idx is None:
+        target = replies
+    else:
+        target = replies[:up_to_idx + 1]
+    for r in target:
+        a = (r.get("author") or {}).get("username", "?")
+        c = html.unescape(str(r.get("content") or ""))
+        lines.append(f"@{a}: {c}")
+    return "\n".join(lines)
+
+
+# ---------- Scratchクライアント ----------
 
 def init():
-        global client, bot_name
-        print("ログイン中...")
-        env = load_env("account.env")
-        client = ScratchClient()
-        client.login(env["name"], env["pass"])
-        bot_name = client.username
-        print(f"ログイン成功: {bot_name}")
+    global client, bot_name, bot_uid
+    print("ログイン中...")
+    env = load_env("account.env")
+    client = ScratchClient()
+    client.login(env["name"], env["pass"])
+    bot_name = client.username
+    # ボットのユーザーIDを取得（commentee判定用）
+    try:
+        me = client.get_json(f"{API}/users/{bot_name}")
+        bot_uid = me.get("id")
+    except Exception:
+        bot_uid = None
+    print(f"ログイン成功: {bot_name} (uid={bot_uid})")
+
+
 class APIError(Exception):
     def __init__(self, message, code=None):
         super().__init__(message)
@@ -296,31 +368,6 @@ def save_replied(ids):
         print(f"  履歴保存失敗: {exc}")
 
 
-# ---------- 既返信チェック（API /replies ベース） ----------
-
-def bot_has_replied(client, studio_id, comment_id, bot_username):
-    try:
-        replies = client.get_json(
-            f"{API}/studios/{studio_id}/comments/{comment_id}/replies?limit=100&offset=0"
-        )
-    except APIError as exc:
-        if exc.code == 404:
-            return True
-        print(f"  (返信確認失敗: {exc})")
-        return False
-    except Exception as exc:
-        print(f"  (返信確認エラー: {exc})")
-        return False
-    if not isinstance(replies, list):
-        return False
-    target = bot_username.lower()
-    for r in replies:
-        author = (r.get("author") or {}).get("username", "")
-        if str(author).lower() == target:
-            return True
-    return False
-
-
 # ---------- レスポンスからコメントID抽出 ----------
 
 def extract_new_id(body):
@@ -351,14 +398,29 @@ def extract_new_id(body):
 # ---------- name 判定 ----------
 
 def is_name(content):
-    """先頭（空白/改行/@を除く）が name で、続きが別ユーザー名の文字でない場合のみ True。"""
-    head = content.lstrip().lower()
+    """先頭が name で始まるコメント、または @<ボット名> の直後に name が続く形式のみ True。"""
+    head = content.lstrip()
+
     if head.startswith("@"):
-        head = head[1:]
-    if not head.startswith(name.lower()):
+        # @botusername 形式のチェック（ASCII ユーザー名部分のみ抽出）
+        m = re.match(r'@([A-Za-z0-9_-]+)', head)
+        if m:
+            mentioned = m.group(1).lower()
+            if bot_name and mentioned == bot_name.lower():
+                # ボットへのメンション → 以降の本文で name を判定
+                head = head[m.end():].lstrip()
+            else:
+                # 他ユーザーへのメンション → ボット宛てではない
+                return False
+        else:
+            # @荒草 のように ASCII ユーザー名でない場合は @ だけ除去
+            head = head[1:].lstrip()
+
+    head_lower = head.lower()
+    if not head_lower.startswith(name.lower()):
         return False
     rest = head[len(name):]
-    if rest and rest[0] in "abcdefghijklmnopqrstuvwxyz0123456789_-":
+    if rest and rest[0].lower() in "abcdefghijklmnopqrstuvwxyz0123456789_-":
         return False
     return True
 
@@ -373,8 +435,42 @@ def load_env(filepath):
     return env
 
 
+# ---------- 返信投稿の共通処理 ----------
+
+def post_reply(client, studio_id, parent_id, commentee_id, content, headers):
+    """返信を投稿して新コメントIDを返す。失敗時 None。"""
+    payload = {
+        "content": content[:500],
+        "parent_id": str(parent_id),
+        "commentee_id": str(commentee_id) if commentee_id is not None else "",
+    }
+    try:
+        raw = client.post_raw(
+            f"{SITE}/site-api/comments/gallery/{studio_id}/add/",
+            payload, headers,
+        )
+    except APIError as exc:
+        print(f"  → 投稿エラー: {exc}")
+        if exc.code in (403, 429):
+            time.sleep(10)
+        return None
+    except Exception as exc:
+        print(f"  → 投稿エラー: {exc}")
+        return None
+    body = raw.decode("utf-8", "replace")
+    new_id = extract_new_id(body)
+    if new_id is None:
+        snippet = body.strip().replace("\n", " ")[:200]
+        print(f"  → 投稿失敗（コメントID取得不可）応答: {snippet}")
+        if re.search(r'error|captcha|blocked|forbidden', body, re.I):
+            print("    ※エラー/ブロックの可能性あり")
+        time.sleep(5)
+    return new_id
+
+
+# ---------- メインループ ----------
+
 def main():
-    
     replied = load_replied()
     print(f"返信済み履歴: {len(replied)} 件")
 
@@ -388,7 +484,6 @@ def main():
     comments = client.get_json(zatudoko)
     print(f"コメント数: {len(comments)}\n")
 
-    # 古い順に処理
     for i in range(len(comments) - 1, -1, -1):
         c = comments[i]
         try:
@@ -396,99 +491,144 @@ def main():
         except (KeyError, TypeError, ValueError):
             print("  (ID不正のためスキップ)")
             continue
-        author = c.get("author") or {}
-        author_name = str(author.get("username", "?"))
-        user_id = author.get("id")
+
+        root_author_obj = c.get("author") or {}
+        root_author = str(root_author_obj.get("username", "?"))
+        root_author_id = root_author_obj.get("id")
         content = html.unescape(str(c.get("content") or ""))
         reply_count = int(c.get("reply_count") or 0)
 
-        print(f"[{cid}] by {author_name} (返信数:{reply_count})")
-        print(f"  内容: {content}")
+        print(f"[{cid}] by {root_author} (返信数:{reply_count})")
+        print(f"  内容: {content[:120]}")
 
-        # (1) ローカル履歴
-        if cid in replied:
-            print("  → スキップ（履歴にあり）")
-            continue
+        # スレッド（返信）を一括取得
+        replies = fetch_thread(client, id, cid) if reply_count > 0 else []
+        for r in replies:
+            ra = (r.get("author") or {}).get("username", "?")
+            rc = html.unescape(str(r.get("content") or ""))
+            print(f"    └ [{r.get('id')}] {ra}: {rc[:80]}")
 
-        # (2) 自分のコメント
-        if author_name.lower() == bot_name.lower():
-            print("  → スキップ（自分のコメント）")
-            continue
+        studio_ctx_text = format_studio_context(load_studio_context())
 
-        # (3) name が先頭に無ければ返信しない
-        if not is_name(content):
-            print("  → スキップ（先頭に name なし）")
-            continue
+        # ==========================================================
+        # (A) トップレベルコメントへの返信
+        # ==========================================================
+        bot_already_in_thread = any(
+            (r.get("author") or {}).get("username", "").lower() == bot_name.lower()
+            for r in replies
+        )
 
-        # (4) 既存返信があればAPIで自分の返信を確認
-        if reply_count > 0:
-            if bot_has_replied(client, id, cid, bot_name):
-                print("  → スキップ（APIで既返信を検出）")
-                replied.add(cid)
+        if (cid not in replied
+                and root_author.lower() != bot_name.lower()
+                and is_name(content)
+                and not bot_already_in_thread):
+            print("  → トップレベルに返信します")
+            thread_ctx = format_thread_context(c, replies)
+            prompt = (
+                f"【スタジオの最近の会話履歴(参考)】\n{studio_ctx_text}\n\n"
+                f"【現在のスレッド】\n{thread_ctx}\n\n"
+                f"上記スレッドのトップレベルコメント (@{root_author}) に対する返信を、"
+                f"500文字以内で必ず日本語で書いてください。"
+                f"（履歴は参考程度に留め、まず現在のスレッドの文脈に沿ってください）"
+            )
+            recomment = ""
+            try:
+                recomment = ask_ai_with_search(prompt)
+            except Exception as exc:
+                print(f"  AIエラー: {exc}")
+
+            if not recomment:
+                print("  → スキップ（AI応答が空）")
+                time.sleep(3)
+            else:
+                budget = max(0, 500 - len(MENTION_PREFIX))
+                final_content = (MENTION_PREFIX + recomment[:budget])[:500]
+                new_id = post_reply(client, id, cid, root_author_id, final_content, headers)
+                if new_id is not None:
+                    print(f"  → 投稿成功: 新コメントID={new_id}")
+                    replied.add(cid)
+                    save_replied(replied)
+                    append_studio_context(root_author, content, final_content)
+                time.sleep(wait_time + 0.12)
+
+        # ==========================================================
+        # (B) 返信への返信
+        # ==========================================================
+        for idx, r in enumerate(replies):
+            try:
+                rid = int(r["id"])
+            except (KeyError, TypeError, ValueError):
+                continue
+
+            if rid in replied:
+                continue
+
+            r_author_obj = r.get("author") or {}
+            r_author = str(r_author_obj.get("username", "?"))
+            r_author_id = r_author_obj.get("id")
+            r_content = html.unescape(str(r.get("content") or ""))
+
+            # commentee_id を取得（API実装差を吸収）
+            r_commentee_id = r.get("commentee_id")
+            if r_commentee_id is None:
+                comm = r.get("commentee")
+                if isinstance(comm, dict):
+                    r_commentee_id = comm.get("id")
+
+            if r_author.lower() == bot_name.lower():
+                continue
+
+            mentions_bot = is_name(r_content)
+            directed_at_bot = (bot_uid is not None and r_commentee_id == bot_uid)
+
+            if not (mentions_bot or directed_at_bot):
+                continue
+
+            # 既にこの返信より後でボットが発言していれば処理済みとみなす
+            bot_replied_after = any(
+                (rr.get("author") or {}).get("username", "").lower() == bot_name.lower()
+                for rr in replies[idx + 1:]
+            )
+            if bot_replied_after:
+                print(f"  → スレッド内で既に返信済みと判断、スキップ (rid={rid})")
+                replied.add(rid)
                 save_replied(replied)
                 continue
-            print("  （他人の返信のみ検出 → 返信続行）")
 
-        # (5) AI応答生成
-        recomment = ""
-        try:
-            recomment = ask_ai_with_search(
-            f"以下のコメントに500文字以内で絶対に日本語(Japanese)で返信してください。\n\n{content}"
+            print(f"  → 返信に返信します (rid={rid} by {r_author})")
+            thread_ctx = format_thread_context(c, replies, up_to_idx=idx)
+            prompt = (
+                f"【スタジオの最近の会話履歴(参考)】\n{studio_ctx_text}\n\n"
+                f"【現在のスレッド】\n{thread_ctx}\n\n"
+                f"上記スレッドの最後のコメント (@{r_author}) への返信を、"
+                f"500文字以内で必ず日本語で書いてください。"
+                f"（履歴は参考程度に留め、まず現在のスレッドの文脈に沿ってください）"
             )
-        except Exception as exc:
-            print(f"  AIエラー: {exc}")
+            recomment = ""
+            try:
+                recomment = ask_ai_with_search(prompt)
+            except Exception as exc:
+                print(f"  AIエラー: {exc}")
 
+            if not recomment:
+                print("  → スキップ（AI応答が空）")
+                time.sleep(3)
+                continue
 
-        if not recomment:
-            print("  → スキップ（AI応答が空）")
-            time.sleep(3)
-            continue
+            budget = max(0, 500 - len(MENTION_PREFIX))
+            final_content = (MENTION_PREFIX + recomment[:budget])[:500]
 
-        # name 先頭なので接頭辞を付与（500字超過を防ぐ）
-        budget = max(0, 500 - len(MENTION_PREFIX))
-        recomment = MENTION_PREFIX + recomment[:budget]
-        print(f"  → name向け: 「{MENTION_PREFIX}」を先頭に付与")
-
-        # (6) 投稿
-        payload = {
-            "content": recomment[:500],
-            "parent_id": str(cid),
-            "commentee_id": str(user_id) if user_id is not None else "",
-        }
-        try:
-            raw = client.post_raw(
-                f"{SITE}/site-api/comments/gallery/{id}/add/",
-                payload, headers,
-            )
-        except APIError as exc:
-            print(f"  → 投稿エラー: {exc}")
-            if exc.code in (403, 429):
-                time.sleep(10)
-            continue
-        except Exception as exc:
-            print(f"  → 投稿エラー: {exc}")
-            continue
-
-        body = raw.decode("utf-8", "replace")
-        new_id = extract_new_id(body)
-        if new_id is None:
-            print("  → 投稿失敗（コメントID取得不可）")
-            snippet = body.strip().replace("\n", " ")[:200]
-            print(f"    応答抜粋: {snippet}")
-            if re.search(r'error|captcha|blocked|forbidden', body, re.I):
-                print("    ※エラー/ブロックの可能性あり")
-            time.sleep(5)
-            continue
-
-        print(f"  → 投稿成功: 新コメントID={new_id}")
-
-        # 通知のみバグ対策: ローカル履歴を必ず更新
-        replied.add(cid)
-        save_replied(replied)
-
-        time.sleep(wait_time+0.12)  # 投稿間隔を少し空ける))
+            # parent_id はスレッドのルート、commentee_id は返信元ユーザー
+            new_id = post_reply(client, id, cid, r_author_id, final_content, headers)
+            if new_id is not None:
+                print(f"  → 投稿成功: 新コメントID={new_id}")
+                replied.add(rid)
+                save_replied(replied)
+                append_studio_context(r_author, r_content, final_content)
+            time.sleep(wait_time + 0.12)
 
     print("\n完了")
+
 
 init()
 while True:
